@@ -79,6 +79,7 @@ class GMDH:
         val_frac: float = 0.30,
         max_neurons: int = 8,
         random_state: int = 1,
+        output_mode: str = "average",
     ):
         self.alpha = alpha
         self.ridge = ridge
@@ -86,6 +87,7 @@ class GMDH:
         self.val_frac = val_frac
         self.max_neurons = max_neurons
         self.random_state = random_state
+        self.output_mode = output_mode  # "average" (p_average) or "best"
 
     # -- fitting ---------------------------------------------------------
     def fit(self, X, y) -> "GMDH":
@@ -188,8 +190,12 @@ class GMDH:
         X = np.asarray(X, dtype=float)
         Z = (X - self.mu_) / self.sig_
         vals = self._eval_layers(Z)
-        final = vals[self.output_layer + 1]  # (n, n_neurons) in std-y units
-        out = final.mean(axis=1)
+        if self.output_mode == "best" and self.best is not None:
+            li, ni = self.best[1], self.best[2]
+            out = vals[li + 1][:, ni]  # single best neuron, std-y units
+        else:
+            final = vals[self.output_layer + 1]  # (n, n_neurons) in std-y units
+            out = final.mean(axis=1)
         return out * self.ys_ + self.ym_
 
     def _hidden_activations(self, X) -> np.ndarray:

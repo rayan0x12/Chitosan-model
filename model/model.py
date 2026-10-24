@@ -1,30 +1,24 @@
-"""One-command GMDH pipeline: train / validate / sensitivity / dose-sweep.
+"""One-command GMDH pipeline: train / validate / feature & hyperparameter analysis.
 
 Run from anywhere with a single command::
 
     python model/model.py
 
-The pipeline is a *framework*.  It reads the curated dataset
-(``data/sheet1_cleaned.csv``), builds the three nested input sets (A/B/C) and
-the two normalised targets (``ratio`` = UCS_treated/q0 and its log), then runs:
+The pipeline reads the curated dataset (``data/sheet1_cleaned.csv``), then:
 
-  1. Training with four validation protocols:
-       - random 80/20 split
-       - k-fold cross-validation (k = 5)
-       - leave-one-study-out (LOSO) — the headline protocol
-       - bootstrap resampling
-  2. Sensitivity / importance:
-       - Liong et al. (2000) one-at-a-time perturbation
-       - SHAP values (if the ``shap`` package is installed)
-       - gradient (finite-difference) importance of the white-box polynomial
-  3. A dose-sweep: predict UCS/q0 across a chitosan-dose grid at fixed values
-     of the other inputs.
+  1. reproduces the original single-layer GMDH configuration across the three
+     nested input sets (A/B/C) and both normalised targets (ratio / logratio);
+  2. compares against two honest baselines (predict-the-training-mean and a
+     linear ridge regression) under the same leave-one-study-out (LOSO) protocol;
+  3. runs a one-factor analysis of the levers that can plausibly reduce
+     underfitting — log transforms of dose/curing time, an explicit
+     form/solvent categorical, a single-best-neuron output, and a second layer;
+  4. reports train/test R² and RMSE for an 80/20 split, k-fold CV, LOSO and an
+     in-sample within-study R² (representational capacity).
 
-All random steps use the fixed seeds in ``config.py``.  Every artefact is
-written to ``output/`` (gitignored) so the repository never ships with
-calibration numbers baked into the source tree.
-
-Status: model calibration and validation — in progress.
+All random steps use the fixed seeds in ``config.py``; artefacts are written to
+``output/`` (gitignored). The pipeline never removes an observation or feature;
+it only adds feature transforms / encodings.
 """
 
 from __future__ import annotations
@@ -40,20 +34,22 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-# Make this file importable as a module and as a script from the repo root.
 HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
 from config import (  # noqa: E402
-    DATA_DIR, SHEET1, FIG_DIR, OUT_DIR, FEATURE_LABELS, INPUT_SETS, TARGETS,
-    TARGET_LABELS, FEATURE_KEY, GMDH_KWARGS, SEEDS, KFOLD, N_BOOTSTRAP,
-    CHANGE_FACTORS, PLOT_RC, PALETTE, DPI,
+    SHEET1, OUT_DIR, INPUT_SETS, TARGETS, TARGET_LABELS, FEATURE_KEY,
+    GMDH_KWARGS, SEEDS, KFOLD, N_BOOTSTRAP, CHANGE_FACTORS, PLOT_RC, DPI,
 )
 from gmdh import GMDH  # noqa: E402
 
 plt.rcParams.update(PLOT_RC)
 os.makedirs(OUT_DIR, exist_ok=True)
+
+# Form/solvent categories used for the explicit categorical feature.
+# "dry" is the reference level (not one-hot encoded); "other" is dropped.
+FORM_CLASSES = ["nano", "acid", "solution", "water"]
 
 
 # ---------------------------------------------------------------------------
@@ -63,7 +59,6 @@ _NUM = re.compile(r"^[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?")
 
 
 def parse_num(cell):
-    """Parse a cell that may be ``"13.16 (derived ...)"`` -> 13.16, else None."""
     if cell is None:
         return None
     s = str(cell).strip()
@@ -83,7 +78,6 @@ def parse_num(cell):
 
 
 def load_rows():
-    """Return one dict per eligible row, with the v2 inclusion rules applied."""
     with open(SHEET1, newline="", encoding="utf-8-sig") as fh:
         rd = list(csv.reader(fh))
     hdr = rd[0]
@@ -97,7 +91,7 @@ def load_rows():
         if status.lower() == "incomplete":
             continue
         cyc = parse_num(r[idx["WetDry_FT_Cycles_Number"]])
-        if cyc is not None and cyc > 0:  # no wet-dry / freeze-thaw cycled rows
+        if cyc is not None and cyc > 0:
             continue
         rows.append({
             "ref": ref,
@@ -125,8 +119,24 @@ def study_label(r: dict) -> str:
     return r["ref"]
 
 
+def form_class(r: dict) -> str:
+    """Coarse form/solvent class, from the treatment metadata."""
+    s = r["solv"].lower()
+    t = r["ctype"].lower()
+    if "nano" in t:
+        return "nano"
+    if "acetic" in s:
+        return "acid"
+    if "solution" in t:
+        return "solution"
+    if "water" in s:
+        return "water"
+    if "none" in s or "dry" in s or s in ("", "na", "nan"):
+        return "dry"
+    return "other"
+
+
 def build_df(rows, feats):
-    """Keep rows with every feature + q0 + ucs present and positive."""
     out = []
     for r in rows:
         vals = [r["q0"], r["ucs"]] + [r[FEATURE_KEY[f]] for f in feats]
@@ -139,19 +149,48 @@ def build_df(rows, feats):
     df["ratio"] = df["ucs"] / df["q0"]
     df["logratio"] = np.log(df["ucs"] / df["q0"])
     df["treat"] = [study_label(r) for r in out]
+    df["form"] = [form_class(r) for r in out]
     return df
 
 
-def Xy(df, feats, target):
-    cols = []
+def make_X(df, feats, opts):
+    """Build the design matrix for a feature set and transform options."""
+    cols, names = [], []
     for f in feats:
-        v = df[FEATURE_KEY[f]].astype(float).values
-        if f == "q0":
-            v = v / 1000.0  # kPa -> MPa (feature convention)
+        if f == "CC":
+            v = df["cc"].astype(float).values
+            if opts.get("log_dose"):
+                v = np.log(np.clip(v, 1e-6, None))
+                names.append("log_CC")
+            else:
+                names.append("CC")
+        elif f == "CTi":
+            v = df["cti"].astype(float).values
+            if opts.get("log_cti"):
+                v = np.log1p(v)
+                names.append("log_CTi")
+            else:
+                names.append("CTi")
+        elif f == "PI":
+            v = df["pi"].astype(float).values
+            names.append("PI")
+        elif f == "WMC":
+            v = df["wmc"].astype(float).values
+            names.append("WMC")
+        elif f == "q0":
+            v = df["q0"].astype(float).values / 1000.0  # kPa -> MPa
+            names.append("q0_MPa")
         cols.append(v)
-    X = np.column_stack(cols)
-    y = df[target].astype(float).values
-    return X, y
+    if opts.get("add_form"):
+        f = df["form"].values
+        for cls in FORM_CLASSES:
+            cols.append((f == cls).astype(float))
+            names.append("form_" + cls)
+    return np.column_stack(cols), names
+
+
+def _y(df, target):
+    return df[target].astype(float).values
 
 
 # ---------------------------------------------------------------------------
@@ -168,29 +207,48 @@ def metrics(y, yp):
     return r2, rmse, mae
 
 
-def _fit(Xtr, ytr):
-    m = GMDH(random_state=SEEDS["gmdh"], **GMDH_KWARGS)
+# ---------------------------------------------------------------------------
+# Predictors (GMDH + two baselines)
+# ---------------------------------------------------------------------------
+def _gmdh_predict(Xtr, ytr, Xte, kwargs):
+    m = GMDH(random_state=SEEDS["gmdh"], **kwargs)
     m.fit(Xtr, ytr)
-    return m
+    return m.predict(Xte)
+
+
+def _mean_predict(Xtr, ytr, Xte, _=None):
+    return np.full(Xte.shape[0], np.mean(ytr))
+
+
+def _ridge_predict(Xtr, ytr, Xte, lam=1.0):
+    mu = Xtr.mean(axis=0)
+    sd = Xtr.std(axis=0)
+    sd[sd == 0] = 1.0
+    Ztr = (Xtr - mu) / sd
+    Zte = (Xte - mu) / sd
+    A = np.column_stack([np.ones(len(Ztr)), Ztr])
+    w = np.linalg.pinv(A.T @ A + lam * np.eye(A.shape[1])) @ A.T @ ytr
+    return np.column_stack([np.ones(len(Zte)), Zte]) @ w
 
 
 # ---------------------------------------------------------------------------
-# Validation protocols
+# Validation protocols (all take a `fit_predict(Xtr, ytr, Xte)` callable)
 # ---------------------------------------------------------------------------
-def split_80_20(df, feats, target):
-    """One deterministic 80/20 train/test split."""
-    X, y = Xy(df, feats, target)
+def split_80_20(df, feats, target, opts, fit_predict):
+    X, names = make_X(df, feats, opts)
+    y = _y(df, target)
     rng = np.random.RandomState(SEEDS["split"])
     perm = rng.permutation(len(y))
     n_tr = int(round(0.8 * len(y)))
     tr, te = perm[:n_tr], perm[n_tr:]
-    m = _fit(X[tr], y[tr])
-    return metrics(y[tr], m.predict(X[tr])), metrics(y[te], m.predict(X[te]))
+    yp_tr = fit_predict(X[tr], y[tr], X[tr])
+    yp_te = fit_predict(X[tr], y[tr], X[te])
+    return metrics(y[tr], yp_tr), metrics(y[te], yp_te)
 
 
-def kfold_cv(df, feats, target, k=KFOLD):
-    """Deterministic k-fold cross-validation; returns fold test metrics."""
-    X, y = Xy(df, feats, target)
+def kfold_cv(df, feats, target, opts, fit_predict, k=KFOLD):
+    X, names = make_X(df, feats, opts)
+    y = _y(df, target)
     rng = np.random.RandomState(SEEDS["cv"])
     perm = rng.permutation(len(y))
     folds = np.array_split(perm, k)
@@ -198,201 +256,208 @@ def kfold_cv(df, feats, target, k=KFOLD):
     for f in folds:
         mask = np.ones(len(y), dtype=bool)
         mask[f] = False
-        m = _fit(X[mask], y[mask])
-        out.append(metrics(y[f], m.predict(X[f])))
+        yp = fit_predict(X[mask], y[mask], X[f])
+        out.append(metrics(y[f], yp))
     return out
 
 
-def leave_one_study_out(df, feats, target):
-    """Leave-one-study-out: train on all studies but one, predict the held-out."""
+def leave_one_study_out(df, feats, target, opts, fit_predict, min_train=8):
     y_all, yp_all, per = [], [], {}
     for study, sub in df.groupby("ref"):
         tr = df[df["ref"] != study]
-        if len(tr) < 8:
+        if len(tr) < min_train:
             continue
-        Xtr, ytr = Xy(tr, feats, target)
-        Xte, yte = Xy(sub, feats, target)
-        m = _fit(Xtr, ytr)
-        yp = m.predict(Xte)
+        Xtr, _ = make_X(tr, feats, opts)
+        Xte, _ = make_X(sub, feats, opts)
+        ytr = _y(tr, target)
+        yte = _y(sub, target)
+        yp = fit_predict(Xtr, ytr, Xte)
         y_all += list(yte)
         yp_all += list(yp)
         per[study] = metrics(yte, yp)
     return metrics(np.array(y_all), np.array(yp_all)), per
 
 
-def bootstrap(df, feats, target, n_boot=N_BOOTSTRAP):
-    """Bootstrap resample the full dataset; returns the distribution of R2/RMSE."""
-    X, y = Xy(df, feats, target)
-    rng = np.random.RandomState(SEEDS["bootstrap"])
-    n = len(y)
-    r2s, rmses = [], []
-    for _ in range(n_boot):
-        idx = rng.randint(0, n, n)
-        m = _fit(X[idx], y[idx])
-        r2, rmse, _ = metrics(y[idx], m.predict(X[idx]))
-        r2s.append(r2)
-        rmses.append(rmse)
-    return np.array(r2s), np.array(rmses)
+def within_study_r2(df, feats, target, opts, fit_predict):
+    """In-sample per-study R² — can the model represent each study's curve?."""
+    X, names = make_X(df, feats, opts)
+    y = _y(df, target)
+    yp = fit_predict(X, y, X)  # in-sample (optimistic)
+    per = {}
+    for study, sub in df.groupby("ref"):
+        idx = df.index.get_indexer(sub.index)
+        per[study] = metrics(y[idx], yp[idx])[0]
+    return float(np.mean(list(per.values()))), per
 
 
 # ---------------------------------------------------------------------------
-# Sensitivity / importance
+# Experiments
 # ---------------------------------------------------------------------------
-def liong_sensitivity(model, X, feats):
-    """Liong et al. (2000): percent change in output under per-input perturbation."""
-    base = model.predict(X)
-    out = {}
-    for k, f in enumerate(feats):
-        deltas = []
-        for cf in CHANGE_FACTORS:
-            Xp = X.copy()
-            Xp[:, k] = Xp[:, k] * cf
-            deltas.append(float(np.mean(np.abs((model.predict(Xp) - base) / (base + 1e-12)))))
-        out[f] = float(np.mean(deltas))
-    return out
+def _fmt(r2, rmse, *_):
+    return f"R2={r2:+.3f} RMSE={rmse:.3f}"
 
 
-def gradient_importance(model, X, feats):
-    """Mean |d(output)/d(input)| via central finite differences on raw inputs."""
-    out = {}
-    for k, f in enumerate(feats):
-        s = X[:, k].std() * 1e-3 + 1e-9
-        Xp, Xm = X.copy(), X.copy()
-        Xp[:, k] += s
-        Xm[:, k] -= s
-        grad = (model.predict(Xp) - model.predict(Xm)) / (2 * s)
-        out[f] = float(np.mean(np.abs(grad)))
-    return out
-
-
-def shap_importance(model, X, feats):
-    """SHAP values for the GMDH (callable), if the ``shap`` package is present."""
-    try:
-        import shap  # type: ignore
-    except Exception:
-        return None
-    # KernelSHAP needs a predict that returns a scalar per row.
-    def f(x):
-        return model.predict(x)
-    X_bg = X[: min(len(X), 50)]
-    explainer = shap.KernelExplainer(f, X_bg)
-    sh = explainer.shap_values(X[: min(len(X), 200)], nsamples=50)
-    if isinstance(sh, list):
-        sh = sh[0]
-    return {f: float(np.mean(np.abs(sh[:, k]))) for k, f in enumerate(feats)}
-
-
-# ---------------------------------------------------------------------------
-# Dose sweep (framework: predict UCS/q0 over a dose grid)
-# ---------------------------------------------------------------------------
-def dose_sweep(df, feats, target, dose_grid=None):
-    """Sweep the chitosan dose at median values of the other inputs.
-
-    Returns a DataFrame with the swept dose and the predicted target.  This is
-    a *procedure*, not a reported optimum: any optimum that sits on the grid
-    boundary is an artefact of the sweep range, not a physical optimum.
-    """
-    if dose_grid is None:
-        dose_grid = np.linspace(0.1, 2.5, 49)
-    X, y = Xy(df, feats, target)
-    m = _fit(X, y)
-
-    med = np.median(X, axis=0)
-    # locate the dose (CC) column
-    cc_idx = feats.index("CC")
-    rows = []
-    for cc in dose_grid:
-        x = med.copy()
-        x[cc_idx] = cc
-        rows.append([cc, float(m.predict(x.reshape(1, -1))[0])])
-    return pd.DataFrame(rows, columns=["Chitosan_dose_%", "predicted_" + target])
-
-
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
 def main():
     rows = load_rows()
     dfs = {name: build_df(rows, feats) for name, feats in INPUT_SETS.items()}
 
-    # 1) validation table
-    table = []
+    # --- 1. original configuration across sets/targets ---------------------
+    print("== 1. original config (max_layers=1, average, raw features) ==")
+    orig = GMDH_KWARGS.copy()
     for name, feats in INPUT_SETS.items():
         df = dfs[name]
         for tgt in TARGETS:
-            tr_met, te_met = split_80_20(df, feats, tgt)
-            folds = kfold_cv(df, feats, tgt)
-            loso_met, _ = leave_one_study_out(df, feats, tgt)
-            r2_boot, rmse_boot = bootstrap(df, feats, tgt)
-            table.append({
-                "set": name, "target": tgt, "n": len(df),
-                "studies": df["ref"].nunique(),
-                "train_r2": tr_met[0], "test_r2": te_met[0], "test_rmse": te_met[1],
-                "cv_r2_mean": float(np.mean([m[0] for m in folds])),
-                "cv_rmse_mean": float(np.mean([m[1] for m in folds])),
-                "loso_r2": loso_met[0], "loso_rmse": loso_met[1],
-                "boot_r2_med": float(np.median(r2_boot)),
-                "boot_rmse_med": float(np.median(rmse_boot)),
-            })
-    pd.DataFrame(table).to_csv(os.path.join(OUT_DIR, "validation.csv"), index=False)
+            tr_met, te_met = split_80_20(df, feats, tgt, {}, _gmdh_predict_w(orig))
+            folds = kfold_cv(df, feats, tgt, {}, _gmdh_predict_w(orig))
+            loso_met, _ = leave_one_study_out(df, feats, tgt, {}, _gmdh_predict_w(orig))
+            ws_mean, _ = within_study_r2(df, feats, tgt, {}, _gmdh_predict_w(orig))
+            print(f"[{name}/{tgt}] n={len(df)} stud={df['ref'].nunique()} "
+                  f"train {_fmt(*tr_met)} | test {_fmt(*te_met)} | "
+                  f"CV {np.mean([m[0] for m in folds]):+.3f} | "
+                  f"LOSO {_fmt(*loso_met)} | within-study R2 {ws_mean:+.3f}")
 
-    # 2) sensitivity / importance (on set A, ratio target — the largest set)
+    # --- 2. baselines under LOSO (set A, both targets) --------------------
+    print("\n== 2. LOSO baselines (set A) ==")
+    for tgt in TARGETS:
+        mean_met, _ = leave_one_study_out(dfs["A"], INPUT_SETS["A"], tgt, {}, _mean_predict)
+        ridge_met, _ = leave_one_study_out(dfs["A"], INPUT_SETS["A"], tgt, {}, _ridge_predict)
+        print(f"[{tgt}] mean-predict LOSO {_fmt(*mean_met)} | ridge-linear LOSO {_fmt(*ridge_met)}")
+
+    # --- 3. one-factor analysis (set A, ratio target) ---------------------
+    print("\n== 3. one-factor analysis (set A, ratio) ==")
+    featsA = INPUT_SETS["A"]
     dfA = dfs["A"]
-    X, y = Xy(dfA, INPUT_SETS["A"], "ratio")
-    m = _fit(X, y)
-    sens = {
-        "liong": liong_sensitivity(m, X, INPUT_SETS["A"]),
-        "gradient": gradient_importance(m, X, INPUT_SETS["A"]),
-        "shap": shap_importance(m, X, INPUT_SETS["A"]),
-    }
+
+    def report(label, opts, kwargs):
+        loso_met, per = leave_one_study_out(dfA, featsA, "ratio", opts, _gmdh_predict_w(kwargs))
+        ws_mean, _ = within_study_r2(dfA, featsA, "ratio", opts, _gmdh_predict_w(kwargs))
+        tr, te = split_80_20(dfA, featsA, "ratio", opts, _gmdh_predict_w(kwargs))
+        print(f"  {label:34s} LOSO {_fmt(*loso_met)} | within-study {ws_mean:+.3f} "
+              f"| test {_fmt(*te)}")
+        return loso_met
+
+    report("original", {}, orig)
+    report("log-dose", {"log_dose": True}, orig)
+    report("log-dose + log-curing", {"log_dose": True, "log_cti": True}, orig)
+    report("log + form dummies", {"log_dose": True, "log_cti": True, "add_form": True}, orig)
+    report("log + form + best-neuron", {"log_dose": True, "log_cti": True, "add_form": True},
+           {**orig, "output_mode": "best"})
+    report("log + form + 2 layers", {"log_dose": True, "log_cti": True, "add_form": True},
+           {**orig, "max_layers": 2})
+    report("2 layers (raw)", {}, {**orig, "max_layers": 2})
+    report("best-neuron (raw)", {}, {**orig, "output_mode": "best"})
+
+    # --- 4. small hyperparameter sweep (LOSO, set A ratio, log+form) ------
+    print("\n== 4. hyperparameter sweep (set A ratio, log+form features, LOSO) ==")
+    base_opts = {"log_dose": True, "log_cti": True, "add_form": True}
+    best = (np.inf, None)
+    for alpha in (0.3, 0.6, 1.0):
+        for maxn in (3, 8, 15):
+            for outmode in ("average", "best"):
+                kw = {**orig, "alpha": alpha, "max_neurons": maxn, "output_mode": outmode}
+                loso_met, _ = leave_one_study_out(dfA, featsA, "ratio", base_opts, _gmdh_predict_w(kw))
+                print(f"    alpha={alpha} maxn={maxn:2d} out={outmode:7s} -> LOSO {_fmt(*loso_met)}")
+                if loso_met[1] < best[0]:
+                    best = (loso_met[1], dict(alpha=alpha, max_neurons=maxn, output_mode=outmode))
+    print(f"  best-by-RMSE: {best[1]}")
+
+    # --- 5. sensitivity + dose sweep (kept from the framework) ------------
+    _sensitivity_and_sweep(dfA, featsA)
+
+    # --- write a comparison CSV -------------------------------------------
+    _write_comparison(dfs)
+
+    print("\nDONE -> output/")
+
+
+def _gmdh_predict_w(kwargs):
+    def _f(Xtr, ytr, Xte):
+        return _gmdh_predict(Xtr, ytr, Xte, kwargs)
+    return _f
+
+
+def _sensitivity_and_sweep(dfA, featsA):
+    """Liong / gradient / SHAP + a dose sweep (set A ratio, original config)."""
+    X, names = make_X(dfA, featsA, {})
+    y = _y(dfA, "ratio")
+    m = GMDH(random_state=SEEDS["gmdh"], **GMDH_KWARGS)
+    m.fit(X, y)
+
+    # Liong
+    liong = {}
+    base = m.predict(X)
+    for k in range(X.shape[1]):
+        d = []
+        for cf in CHANGE_FACTORS:
+            Xp = X.copy()
+            Xp[:, k] *= cf
+            d.append(float(np.mean(np.abs((m.predict(Xp) - base) / (base + 1e-12)))))
+        liong[names[k]] = float(np.mean(d))
+
+    # gradient
+    grad = {}
+    for k in range(X.shape[1]):
+        s = X[:, k].std() * 1e-3 + 1e-9
+        Xp, Xm = X.copy(), X.copy()
+        Xp[:, k] += s
+        Xm[:, k] -= s
+        g = (m.predict(Xp) - m.predict(Xm)) / (2 * s)
+        grad[names[k]] = float(np.mean(np.abs(g)))
+
+    # SHAP (optional)
+    shap_vals = None
+    try:
+        import shap  # type: ignore
+        def f(x):
+            return m.predict(x)
+        explainer = shap.KernelExplainer(f, X[: min(len(X), 50)])
+        sv = explainer.shap_values(X[: min(len(X), 200)], nsamples=50)
+        if isinstance(sv, list):
+            sv = sv[0]
+        shap_vals = {names[k]: float(np.mean(np.abs(sv[:, k]))) for k in range(X.shape[1])}
+    except Exception:
+        pass
+
     with open(os.path.join(OUT_DIR, "sensitivity.csv"), "w", newline="") as fh:
         w = csv.writer(fh)
-        w.writerow(["method"] + INPUT_SETS["A"])
-        for method, vals in sens.items():
-            if vals is None:
-                continue
-            w.writerow([method] + [f"{vals[f]:.4g}" for f in INPUT_SETS["A"]])
+        w.writerow(["method"] + names)
+        w.writerow(["liong"] + [f"{liong[n]:.4g}" for n in names])
+        w.writerow(["gradient"] + [f"{grad[n]:.4g}" for n in names])
+        if shap_vals:
+            w.writerow(["shap"] + [f"{shap_vals[n]:.4g}" for n in names])
 
-    # 3) dose sweep (procedure only)
+    # dose sweep (procedure only)
+    cc_idx = featsA.index("CC")
+    med = np.median(X, axis=0)
+    grid = np.linspace(0.1, 2.5, 49)
+    with open(os.path.join(OUT_DIR, "dose_sweep_A_ratio.csv"), "w", newline="") as fh:
+        w = csv.writer(fh)
+        w.writerow(["dose_%", "predicted_ratio"])
+        for cc in grid:
+            x = med.copy()
+            x[cc_idx] = cc
+            w.writerow([f"{cc:.3f}", f"{m.predict(x.reshape(1, -1))[0]:.4f}"])
+
+
+def _write_comparison(dfs):
+    """Write the headline train/test/CV/LOSO table for the original config."""
+    rows_out = []
     for name, feats in INPUT_SETS.items():
         df = dfs[name]
         for tgt in TARGETS:
-            sweep = dose_sweep(df, feats, tgt)
-            sweep.to_csv(os.path.join(OUT_DIR, f"dose_sweep_{name}_{tgt}.csv"), index=False)
-
-    # 4) a small model-figure for the output folder (parity on set A, ratio)
-    _parity_fig(dfA, INPUT_SETS["A"], "ratio", os.path.join(OUT_DIR, "parity_A_ratio.png"))
-
-    print(f"rows loaded: {len(rows)}")
-    for name, df in dfs.items():
-        print(f"  set {name}: n={len(df)} studies={df['ref'].nunique()}")
-    print("wrote validation.csv, sensitivity.csv, dose_sweep_*.csv -> output/")
-
-
-def _parity_fig(df, feats, target, fname):
-    y_all, yp_all = [], []
-    for study, sub in df.groupby("ref"):
-        tr = df[df["ref"] != study]
-        if len(tr) < 8:
-            continue
-        Xtr, ytr = Xy(tr, feats, target)
-        Xte, yte = Xy(sub, feats, target)
-        m = _fit(Xtr, ytr)
-        yp = m.predict(Xte)
-        y_all += list(yte)
-        yp_all += list(yp)
-    y = np.array(y_all)
-    yp = np.array(yp_all)
-    fig, ax = plt.subplots(figsize=(4, 4))
-    lo, hi = min(y.min(), yp.min()), max(y.max(), yp.max())
-    ax.plot([lo, hi], [lo, hi], "k--", lw=1, alpha=0.5)
-    ax.scatter(y, yp, s=18, alpha=0.75, color="tab:blue")
-    ax.set_xlabel(TARGET_LABELS[target] + " (measured)")
-    ax.set_ylabel(TARGET_LABELS[target] + " (predicted, LOSO)")
-    ax.set_title("Set A, ratio target — LOSO parity")
-    fig.tight_layout()
-    fig.savefig(fname, dpi=DPI)
-    plt.close(fig)
+            tr, te = split_80_20(df, feats, tgt, {}, _gmdh_predict_w(GMDH_KWARGS))
+            folds = kfold_cv(df, feats, tgt, {}, _gmdh_predict_w(GMDH_KWARGS))
+            loso, _ = leave_one_study_out(df, feats, tgt, {}, _gmdh_predict_w(GMDH_KWARGS))
+            ws, _ = within_study_r2(df, feats, tgt, {}, _gmdh_predict_w(GMDH_KWARGS))
+            rows_out.append({
+                "set": name, "target": tgt, "n": len(df), "studies": df["ref"].nunique(),
+                "train_r2": tr[0], "test_r2": te[0], "test_rmse": te[1],
+                "cv_r2": float(np.mean([m[0] for m in folds])),
+                "cv_rmse": float(np.mean([m[1] for m in folds])),
+                "loso_r2": loso[0], "loso_rmse": loso[1],
+                "within_study_r2": ws,
+            })
+    pd.DataFrame(rows_out).to_csv(os.path.join(OUT_DIR, "comparison_original.csv"), index=False)
 
 
 if __name__ == "__main__":
