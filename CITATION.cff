@@ -1,0 +1,21 @@
+cff-version: 1.2.0
+message: "If you use this repository, please cite it as below and cite the original data sources listed in data/sources.csv."
+title: "Chitosan-stabilized expansive clay: extracted dataset and white-box GMDH modelling framework"
+type: software
+authors:
+  - family-names: "[Family name — TODO]"
+    given-names: "[Given name — TODO]"
+    email: "[contact — TODO]"
+    affiliation: "[University / department — TODO]"
+repository-code: "https://github.com/[user]/[repo — TODO]"
+abstract: "A curated dataset of laboratory unconfined-compressive-strength (UCS) and index-property results for chitosan-treated cohesive and expansive soils, extracted from 17 published studies, together with a white-box Group Method of Data Handling (GMDH) modelling framework and a data-extraction protocol."
+keywords:
+  - chitosan
+  - expansive clay
+  - soil stabilization
+  - unconfined compressive strength
+  - GMDH
+  - machine learning
+  - geotechnical engineering
+license: MIT
+date-released: "2026-10-24"

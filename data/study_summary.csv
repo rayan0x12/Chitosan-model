@@ -1,0 +1,18 @@
+﻿Ref_ID,Citation,Sheet1_rows,Soil_types,Properties_with_values,Access
+R01,Wang R.; Ong D.E.L.; Sadighi H.; Goli M.; Xia P.; Fatehi H.; Yao T. (2025) Polymers 17(2):151,8,"Kaolinite silt (Kaolin Malaysia, commercial)",UCS_treated_kPa,full text read
+R02,Bukhary A.; Azam S. (2024) Geotechnics 4(1):322-336,3,"Regina clay (glacio-lacustrine, 47 test pits); Regina expansive clay (glacio-lacustrine, 0.15-2.0 m depth)",Swell_Percent_treated,full text read
+R03,"Parmar J.; Yadav V.; Pandya S. (2020) Proc. Indian Geotechnical Conference 2020 (Visakhapatnam), Theme 8, pp.700-716",3,"Bhavnagar black cotton soil (saline, basaltic origin)",Swell_Pressure_treated_kPa; UCS_treated_kPa,full text read
+R04,Kannan G.; O'Kelly B.C.; Sujatha E.R. (2024) Int. J. Environ. Sci. Technol. 21:2121-2128,2,Ariyalur organic silt (13.6% organic matter),PI_treated,full text read
+R05,Kannan G.; Sujatha E.R.; O'Kelly B.C. (2026) Scientific Reports 16:7793,31,Ariyalur organic silt (13.6% organic matter),LL_treated; PL_treated; PI_treated; UCS_treated_kPa; Secant_Modulus_MPa,full text read
+R06,Jamshidi M.; Mokhberi M.; Vakili A.H.; Nasehi S.A. (2025) Advances in Applied Geology 14(4):896-913,4,"Marl (Shiraz NW belt, Hosseini Al-Hashemi Blvd)",UCS_treated_kPa,full text read
+R07,Banne S.P.; Ingle G.S.; Dhawale A.; Gaikwad S.; Bobade S. (2025) Engineering and Applied Science Research 52(3):270-281,3,"Laterite soil (Lote Parshuram Ghat, Chiplun)",CBR_treated_soaked_%; CBR_treated_unsoaked_%,full text read
+R08,Kannan G.; Sujatha E.R. (2023) Carbohydrate Polymers 299:120227,4,Ariyalur organic silt (13.6% organic matter),UCS_treated_kPa,not accessed (values secondary)
+R09,Reddy D.V.S.S.; Kowshik K.; Kishor M.J.; Chittaranjan M.; Sravani E. (2018) Proc. ICRTEMMS-2018 (conference),20,"Expansive soil (India, Andhra Pradesh presumed; location not extracted)",LL_treated; PL_treated; PI_treated; UCS_treated_kPa; CBR_treated_unsoaked_%,full text read
+R10,Firmansyah D.A.; Somantri A.K.; Sihombing A.V.R.; Sundara A.; Mase L.Z. (2024) Geotechnical Engineering (SEAGS-AGSSEA Journal),1,Soft clay (Indonesia),UCS_treated_kPa,full text read
+R11,Rasheed R.M.; Moghal A.A.B.; Rambabu S.; Almajed A. (2023) Frontiers in Environmental Science 11:1214988,2,Kuttanad soft soil (Kerala),UCS_treated_kPa,full text read
+R12,Rasheed R.M.; Moghal A.A.B.; Jannepally S.S.R.; Rehman A.U.; Chittoori B.C.S. (2023) Buildings 13(9):2230,4,"Kuttanad soft soil (Kuttamangalam, Kerala)",LL_treated,full text read
+R13,Sujatha E.R.; Balasubramanian N.; Gowrisankar E.; Muthukrishnan S.; Vishweshwaran M. (2024) Sustainability 16(15):6408,40,"Low-compressible clay (Thirukattupalli, Thanjavur, Tamil Nadu)",UCS_treated_kPa,full text read
+R14,Firmansyah D.A.; Somantri A.K.; Sihombing A.V.R.; Sundara A.; Mase L.Z. (2024) E3S Web of Conferences 479:06002,4,"Expansive soil (Kadipaten, Majalengka, West Java)",LL_treated; PL_treated; PI_treated,full text read
+R15,Azimi M.; Soltani A.; Mirzababaei M.; Jaksa M.B.; Ashwath N. (2024) Journal of Rock Mechanics and Geotechnical Engineering,10,"Kaolin-bentonite blend (KB) artificial clayey soil, 75% kaolin : 25% bentonite dry mass",UCS_treated_kPa; Secant_Modulus_MPa,full text read
+R16,Abhishek Kumar Jha; Lal Bahadur Roy (2026) Materials Research Express 13:195302,27,"Bentonite; Black cotton soil (Kanwar Jheel, Begusarai, Bihar); Ganga silt (alluvial silt)",UCS_treated_kPa,full text read
+R17,Govindarajan Kannan; Evangelin Ramani Sujatha; Jair de Jesus Arrieta Baldovino; Yamid E. Nunez de la Rosa (2024) Sustainability 16(21):9562,1,"Ariyalur organic silt (black, 13.6% organic matter)",UCS_treated_kPa,full text read
